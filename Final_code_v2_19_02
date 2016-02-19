@@ -1,0 +1,331 @@
+#include<SPI.h>
+#include<Pixy.h>
+#include<Servo.h>
+#include <Wire.h>
+#include <math.h>
+
+//SERVO PARAMETERS
+#define Kp (-1/2)
+#define servo_offset 90
+#define TILT_LIMIT 90
+#define KD 0.5
+#define SET_POINT  35
+
+//COMPASS PARAMETERS
+#define Addr 0x1E               // 7-bit address of HMC5883 compass
+
+//SHARP PARAMETERS
+#define sharp1 A0
+#define sharp2 A1
+#define no_avg  2
+#define sharp1_threshold 30
+#define sharp2_threshold 20
+
+
+//COMPASS PARAMETERS
+#define change1 -70          //T-SECTION    
+#define change2 -35          //RIVER TURN-1
+#define change3  35          //RIVER TURN-2
+#define DEBUG
+
+//SHARP GLOBAL
+unsigned int sharp2_distance,sharp1_distance,data_count;
+unsigned int flag_0,right_count = 0,t_val;
+unsigned int val_1,prev_val1_1=0,prev_val1_2=0;            //SHARP_1 PARAMETER 
+unsigned int val_2,prev_val2_1=0,prev_val2_2=0;            //SHARP_2 PARAMETER
+
+//COMPASS GLOBAL
+int  angle_i, angle_f, angle_c, heading;
+unsigned long time, prev_time;
+
+//SERVO GLOBAL
+int16_t i, blocks, a, err, output, w, error,prev_error,dD;
+float KD_op;
+uint8_t pos, prev_pos;
+
+//FLAGS
+uint8_t flag_river_crossing;
+
+//OBJECTS 
+Pixy pixy;
+Servo myservo;
+
+
+int sharp1_read()
+{
+      val_1 = analogRead(sharp1);
+      t_val = val_1 + prev_val1_1 + prev_val1_2;  
+      prev_val1_2 = prev_val1_1;
+      prev_val1_1 = val_1;
+      if(t_val < 300 )
+          return 0;
+      else
+          return 1;
+} 
+
+
+int sharp2_read()
+{
+     val_2 = analogRead(sharp2);
+     t_val = val_2+ prev_val2_1 + prev_val2_2;
+     prev_val2_2 = prev_val2_1;
+     prev_val2_1 = val_2;
+     if(t_val < 500)
+         return 0;
+     else
+         return 1;
+}
+
+
+void set_servo_position(uint8_t pos)
+{
+         int i; 
+          if(prev_pos<pos)
+          {
+              for(i=prev_pos; i<=pos; i++)
+              {
+                myservo.write(i);
+                delayMicroseconds(500);
+              }
+         }
+         if(pos<prev_pos)
+         {
+           for(i=prev_pos; i>=pos; i--)
+           {
+                myservo.write(i);
+                delayMicroseconds(500);
+           }
+        }
+}
+
+
+
+void setup()
+ {
+          pixy.init();
+          myservo.attach(8); 
+          prev_pos = servo_offset;
+          prev_error = 0;  
+          flag_river_crossing = 0;   
+          Wire.begin();
+          Wire.beginTransmission(Addr); 
+          Wire.write(byte(0x02));       //Mode register address
+          Wire.write(byte(0x00));       // Set operating mode to continuous
+          Wire.endTransmission();  
+}
+ 
+int get_angle()
+{
+        int x, y, z;
+        double heading;
+         int curr_angle;
+        // Initiate communications with hmc583l
+        Wire.beginTransmission(Addr);
+        Wire.write(byte(0x03));       // Send request to X MSB register
+        Wire.endTransmission();
+      
+        Wire.requestFrom(Addr, 6);    // Request 6 bytes; 2 bytes per axis
+        if(Wire.available() <=6)      // If 6 bytes available
+        {    
+          x = Wire.read() << 8 | Wire.read();
+          z = Wire.read() << 8 | Wire.read();
+          y = Wire.read() << 8 | Wire.read(); 
+        }
+        
+        heading = atan2(y,x);
+        if(heading<0)
+        {
+          heading += 2*M_PI;
+        }
+        heading =heading*180/M_PI;
+       curr_angle = (int)(heading);
+       
+        return curr_angle;
+       
+}
+
+int cal_error(int angle,int angle_f)
+{
+          int error;
+          if(angle_f>angle)
+            error=angle_f-angle;
+          else
+            error=angle-angle_f;
+          if((angle_f>270 && angle_f<360) && (angle>0 && angle <90))  
+          {  
+            angle=angle+360;
+            error=angle-angle_f;                    
+          }
+          if((angle>270 && angle<360) && (angle_f>0 && angle_f <90))  
+          {
+            angle_f=angle_f+360;
+            error=angle_f-angle;  
+          } 
+          return error;
+}
+
+//************DELAY_FUNCTION_USED_FOR_CHARGING*****caliberate according to the needs**********
+void delay_nw()                                    
+{
+  delay(500);
+  delay(500);
+  delay(500);
+  delay(500);
+  delay(500);
+  delay(500);
+  delay(500);
+  delay(500);
+  delay(500);
+  delay(500);
+}
+
+void loop()
+{
+  blocks=pixy.getBlocks();
+  if(blocks ) 
+  {
+    
+                    a = (pixy.blocks[0].x>>2);
+                    w = pixy.blocks[0].width;
+                    
+                    if(w>300)
+                    {
+                                  prev_pos = pos;
+                                  heading = get_angle(); 
+                                  prev_pos = pos;                                          
+                                  angle_i = get_angle();
+                                  angle_f= (angle_i+(change1))%360;
+                                  if(angle_f>angle_i)
+                                              angle_f=angle_f+360;
+                                  error=cal_error(angle_i, angle_f);      
+                                  
+                                  set_servo_position(130);                    //FIRST ANGLE TURN ANGLE
+                                  
+                                  while(  error > 5   )                       //FIRST TURN 
+                                  {      
+                                             angle_c=get_angle();
+                                             error=cal_error(angle_c,angle_f);    
+                                   }//Close of while(error >5)
+                                   set_servo_position(90);                    //Line Detection
+                                   
+                                   while(flag_river_crossing == 0)
+                                   {
+                                                     sharp1_distance = sharp1_read();
+                                                     if(sharp1_distance == 1)
+                                                     {
+                                                       
+                                                               while( sharp1_read() == 1);
+                                                              // {
+                                                              //          sharp1_distance = sharp1_read();
+                                                              // }//end of while
+                                                                 
+                                                               angle_i = get_angle();
+                                                               angle_f= (angle_i+(change2))%360;
+                                                               if(angle_f>angle_i)
+                                                                    angle_f=angle_f+360;
+                                                               error=cal_error(angle_i,angle_f);      
+                                              
+                                                               set_servo_position(135);                  //TURN_ANGLE FOR THE RIVER PART
+                                                                                   
+                                                                while( error > 5 )                       //SECOND  TURN  --> RIVER PART 
+                                                                {                        
+                                                                         angle_c=get_angle();
+                                                                         error=cal_error(angle_c,angle_f);     
+                                                                         delay(10);
+                                                                }
+                                                                             
+                                                                prev_pos = pos;
+                                                                set_servo_position(80);                  //80 --> ENTER THE RIVER PART
+                                                                
+                                                                while(right_count < 2 )
+                                                                {
+                                                                        data_count = 0;       
+                                                                        sharp2_distance = sharp2_read();
+                                                                        if(sharp2_distance == 1 )
+                                                                        {
+                                                                                    while(sharp2_distance == 1 )
+                                                                                    {
+                                                                                               sharp2_distance = sharp2_read();
+                                                                                               data_count++;
+                                                                                    }//end of while
+                                                                                   if(data_count > 2 )    //ERROR CORRECTION
+                                                                                             right_count++;
+                                                                                    
+                                                                        }//end of if
+                                                                        
+                                                                }//END OF while(right_count<2);
+                                                                
+                                                                set_servo_position(45);                   //END OF THE RIVER
+                                                                angle_i = get_angle();
+                                                                angle_f= (angle_i+(change3))%360;
+                                                                if(angle_i>angle_f) 
+                                                                        angle_f=angle_f+360;
+                                                                error=cal_error(angle_i,angle_f);      
+                                        
+                                                                while(error > 5 )                          //LAST TURN
+                                                                {
+                                                                             angle_c=get_angle();              
+                                                                             error=cal_error(angle_c,angle_f);
+                                                                }
+                                                                flag_river_crossing = 1 ;                 //set flag to break while loop          
+                                                                prev_pos=pos;
+                                                                set_servo_position(90); 
+                                                     } // close of if (0  < sharp1_dist  <sharp1_threshold )
+                                                     
+                                                     else        //nomrmal line following till detection of 1ST ISLAND
+                                                     {
+                                                               // PIXY NORMAL DETECTION   
+                                                               a = (pixy.blocks[0].x>>2);
+ 
+                                                               err = a-SET_POINT;
+                                                               output = -err<<1;
+                                                                
+                                                               dD = err - prev_error;
+                                                               KD_op = KD*dD; 
+                                                               output = output + KD_op;
+                                                                
+                                                               if(output > TILT_LIMIT)
+                                                                  output = TILT_LIMIT;
+                                                            
+                                                               if(output < -TILT_LIMIT)
+                                                                  output = -TILT_LIMIT;
+                                                               
+                                                                pos = servo_offset - output ;
+                                                                set_servo_position(pos);
+                                                                
+                                                                prev_pos = pos;
+                                                                prev_error = error;
+                                                                delay(2);
+                                                     }//close of else
+                                                     
+                                   }//close of while(flag_river)                                                                                          
+                    }//Close of if(w>300);
+                   
+                    else
+                    {            
+                               // PIXY NORMAL DETECTION   
+                               err = a-SET_POINT;
+                               output = -err<<1;
+                                
+                               dD = err - prev_error;
+                               KD_op = KD*dD; 
+                               output = output + KD_op;
+                                
+                               if(output > TILT_LIMIT)
+                                  output = TILT_LIMIT;
+                            
+                               if(output < -TILT_LIMIT)
+                                  output = -TILT_LIMIT;
+                            
+                                prev_error = error;
+                                pos = servo_offset - output ;
+                                
+                                set_servo_position(pos);
+                                prev_pos = pos;
+                                delay(2);
+                    }//Close of else    
+   }//Close of if(blocks) 
+    
+   
+}//close of void loop  
+ 
